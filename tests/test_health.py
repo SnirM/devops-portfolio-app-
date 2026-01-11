@@ -1,9 +1,9 @@
-from httpx import Client
+from fastapi.testclient import TestClient
 from app.main import app
 
+client = TestClient(app)
 
 def test_health():
-    with Client(app=app, base_url="http://test") as client:
-        response = client.get("/health")
-        assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
