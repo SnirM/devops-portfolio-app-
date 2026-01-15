@@ -1,5 +1,31 @@
+version: "3.8"
+
 services:
   api:
     build: .
+    container_name: devops-api
     ports:
-      - "8000:8000"
+      - "8000:8000"   # ❗ נשאר בדיוק כמו שביקשת
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/devops
+    depends_on:
+      - mongo
+    networks:
+      - devops-net
+
+  mongo:
+    image: mongo:6
+    container_name: devops-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - devops-net
+
+networks:
+  devops-net:
+    driver: bridge
+
+volumes:
+  mongo-data:
