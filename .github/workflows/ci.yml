@@ -52,4 +52,58 @@ jobs:
           docker compose down
 
       # ---------- AWS Auth ----------
-      - n
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr_login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ---------- Build & Push Image ----------
+      - name: Build & Push Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.ecr_login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+
+      # ---------- kubectl ----------
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "latest"
+
+      # ---------- EKS kubeconfig ----------
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name "${{ env.EKS_CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}"
+
+      # ---------- Deploy ----------
+      - name: Deploy to EKS
+        env:
+          IMAGE_URI: ${{ env.IMAGE_URI }}
+        run: |
+          echo "Deploying image: $IMAGE_URI"
+
+          # אם ה-K8S שלך משתמש ב-image placeholder, מחליפים אותו בזמן ריצה
+          # בהנחה שיש לך k8s/ עם קבצים (deployment/service וכו')
+          # ושבתוך deployment יש image: REPLACE_IMAGE
+          if grep -R "REPLACE_IMAGE" -n k8s >/dev/null 2>&1; then
+            sed -i "s|REPLACE_IMAGE|$IMAGE_URI|g" k8s/*.yaml
+          fi
+
+          kubectl apply -f k8s/
+
+          kubectl rollout status deployment/devops-portfolio-app --timeout=180s || true
+          kubectl get pods -o wide
+          kubectl get svc -o wide
