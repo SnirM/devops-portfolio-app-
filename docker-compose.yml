@@ -1,43 +1,17 @@
-version: "3.8"
+version: "3.9"
 
 services:
-  mongo:
-    image: mongo:6
-    container_name: devops-mongo
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo-data:/data/db
-      # אם יש לך init (אופציונלי) – תפעיל רק אם הקובץ באמת קיים בריפו
-      # - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
-    networks:
-      - devops-net
-    healthcheck:
-      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' localhost:27017 | grep 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
-
-  api:
+  app:
     build: .
-    container_name: devops-api
     ports:
       - "8000:8000"
-    environment:
-      - MONGO_URI=mongodb://mongo:27017/devops
-      # אם האפליקציה שלך קוראת גם PORT:
-      - PORT=8000
     depends_on:
-      mongo:
-        condition: service_healthy
-    networks:
-      - devops-net
-    restart: unless-stopped
+      - db
 
-networks:
-  devops-net:
-    driver: bridge
-
-volumes:
-  mongo-data:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: appdb
+    ports:
+      - "5432:5432"
