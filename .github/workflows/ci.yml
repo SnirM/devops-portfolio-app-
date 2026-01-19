@@ -43,7 +43,10 @@ jobs:
       # Unit tests
       # -----------------------------
       - name: Unit tests (pytest)
-        run: pytest -v
+           run: |
+            export PYTHONPATH=$PWD
+            pytest -v
+
 
       # -----------------------------
       # Integration tests (docker-compose)
@@ -120,3 +123,4 @@ jobs:
           kubectl apply -f k8s-manifests/app/
 
           kubectl get pods -A
+
