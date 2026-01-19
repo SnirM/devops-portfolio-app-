@@ -13,7 +13,7 @@ env:
   ECR_REPOSITORY: devops-portfolio-app
   PYTHON_VERSION: "3.11"
 
-  # ---- Kubernetes deploy targets (adjust if your YAML uses different names) ----
+  # Kubernetes targets (adjust if your deployment/container names differ)
   K8S_NAMESPACE: demo
   DEPLOYMENT_NAME: devops-portfolio-app
   CONTAINER_NAME: devops-portfolio-app
@@ -23,8 +23,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      # ------------------ Checkout APP repo (this repo) ------------------
+      - name: Checkout (app repo)
         uses: actions/checkout@v4
+
+      - name: DEBUG - list files in app repo
+        run: |
+          pwd
+          ls -la
+          echo "---- tree (top) ----"
+          find . -maxdepth 2 -type d -print
 
       # ------------------ Python + Tests ------------------
       - name: Setup Python
@@ -51,7 +59,7 @@ jobs:
           bash tests/integration/smoke.sh
           docker compose down
 
-      # ------------------ AWS Auth (THIS decides which IAM user is used) ------------------
+      # ------------------ AWS Auth ------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -59,14 +67,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # DEBUG: show identity used by the workflow
       - name: DEBUG - AWS identity (who am I)
         run: |
           aws --version
           aws sts get-caller-identity
           aws iam get-user || true
 
-      # Pre-check: can this identity describe the cluster?
       - name: DEBUG - EKS DescribeCluster
         run: |
           aws eks describe-cluster \
@@ -94,6 +100,20 @@ jobs:
           docker push "${IMAGE_URI}"
           docker push "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:latest"
 
+      # ------------------ Checkout K8S manifests repo ------------------
+      - name: Checkout (k8s manifests repo)
+        uses: actions/checkout@v4
+        with:
+          repository: SnirM/devops-portfolio-k8s
+          ref: main
+          path: k8s-manifests
+
+      - name: DEBUG - list files in k8s manifests repo
+        run: |
+          ls -la k8s-manifests
+          echo "---- tree (k8s-manifests) ----"
+          find k8s-manifests -maxdepth 2 -type d -print
+
       # ------------------ kubectl + EKS ------------------
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
@@ -106,20 +126,20 @@ jobs:
             --name "${{ env.EKS_CLUSTER_NAME }}" \
             --region "${{ env.AWS_REGION }}"
 
-      # ------------------ Deploy (FIXED: no k8s/ path) ------------------
+      # ------------------ Deploy ------------------
       - name: Deploy to EKS
         run: |
           kubectl version --client=true
           kubectl cluster-info
 
           echo "Applying namespaces/"
-          kubectl apply -f namespaces/
+          kubectl apply -f k8s-manifests/namespaces/
 
           echo "Applying database/"
-          kubectl apply -f database/
+          kubectl apply -f k8s-manifests/database/
 
           echo "Applying app/"
-          kubectl apply -f app/
+          kubectl apply -f k8s-manifests/app/
 
           echo "Set app image to the one built in this workflow:"
           echo "  Namespace: ${{ env.K8S_NAMESPACE }}"
