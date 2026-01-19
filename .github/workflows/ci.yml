@@ -17,50 +17,49 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # -----------------------------
+      # ----------------------------
       # Checkout code
-      # -----------------------------
+      # ----------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # -----------------------------
+      # ----------------------------
       # Setup Python
-      # -----------------------------
+      # ----------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # -----------------------------
+      # ----------------------------
       # Install dependencies
-      # -----------------------------
+      # ----------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # -----------------------------
+      # ----------------------------
       # Unit tests
-      # -----------------------------
+      # ----------------------------
       - name: Unit tests (pytest)
-           run: |
-            export PYTHONPATH=$PWD
-            pytest -v
-
-
-      # -----------------------------
-      # Integration tests (docker-compose)
-      # -----------------------------
-      - name: Integration tests
         run: |
-          docker compose -f docker-compose.yml up -d
-          sleep 15
-          pytest tests/integration -v
+          export PYTHONPATH="$GITHUB_WORKSPACE"
+          pytest -v
+
+      # ----------------------------
+      # Integration tests (docker-compose)
+      # ----------------------------
+      - name: Integration tests (docker compose)
+        run: |
+          docker compose up -d --build
+          curl -f http://localhost:8000/health
+          bash tests/integration/smoke.sh
           docker compose down
 
-      # -----------------------------
+      # ----------------------------
       # Configure AWS credentials
-      # -----------------------------
+      # ----------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -68,59 +67,54 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # -----------------------------
-      # 🔍 WHO AM I – קריטי!
-      # -----------------------------
+      # ----------------------------
+      # Who am I (AWS identity)
+      # ----------------------------
       - name: Who am I (AWS identity)
         run: aws sts get-caller-identity
 
-      # -----------------------------
+      # ----------------------------
       # Login to Amazon ECR
-      # -----------------------------
+      # ----------------------------
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      # -----------------------------
-      # Build & Push Docker image
-      # -----------------------------
-      - name: Build and push Docker image to ECR
+      # ----------------------------
+      # Build & Push Docker image to ECR
+      # ----------------------------
+      - name: Build & Push Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          IMAGE_URI=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:latest
-          docker build -t $IMAGE_URI .
-          docker push $IMAGE_URI
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
 
-      # -----------------------------
+          docker build -t "${IMAGE_URI}" .
+          docker push "${IMAGE_URI}"
+
+      # ----------------------------
       # Setup kubectl
-      # -----------------------------
+      # ----------------------------
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
+        with:
+          version: "latest"
 
-      # -----------------------------
+      # ----------------------------
       # Update kubeconfig for EKS
-      # -----------------------------
+      # ----------------------------
       - name: Update kubeconfig for EKS
         run: |
-          aws eks update-kubeconfig \
-            --region ${{ env.AWS_REGION }} \
-            --name ${{ env.EKS_CLUSTER_NAME }}
-
-      # -----------------------------
-      # Debug – list manifests
-      # -----------------------------
-      - name: DEBUG – list k8s manifests
-        run: ls -R k8s-manifests
-
-      # -----------------------------
-      # Deploy to EKS
-      # -----------------------------
-      - name: Deploy to EKS
-        run: |
-          kubectl version --client=true
+          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
           kubectl cluster-info
 
+      # ----------------------------
+      # Deploy to EKS (apply manifests)
+      # ----------------------------
+      - name: Deploy to EKS
+        run: |
           kubectl apply -f k8s-manifests/namespaces/
           kubectl apply -f k8s-manifests/database/
           kubectl apply -f k8s-manifests/app/
-
           kubectl get pods -A
-
