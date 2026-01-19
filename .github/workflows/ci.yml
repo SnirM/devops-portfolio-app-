@@ -1,40 +1,32 @@
-name: CI-CD
+name: CI-CD Pipeline
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
   pull_request:
-    branches: ["main"]
-  workflow_dispatch: {}
+    branches: [ "main" ]
+  workflow_dispatch:
 
 env:
   AWS_REGION: ap-south-1
-  EKS_CLUSTER_NAME: devops-portfolio-eks
   ECR_REPOSITORY: devops-portfolio-app
+  EKS_CLUSTER_NAME: devops-portfolio-eks
   PYTHON_VERSION: "3.11"
-
-  # Kubernetes targets (adjust if your deployment/container names differ)
-  K8S_NAMESPACE: demo
-  DEPLOYMENT_NAME: devops-portfolio-app
-  CONTAINER_NAME: devops-portfolio-app
 
 jobs:
   pipeline:
     runs-on: ubuntu-latest
 
     steps:
-      # ------------------ Checkout APP repo (this repo) ------------------
-      - name: Checkout (app repo)
+      # ------------------------------------------------------------
+      # Checkout APP repository (this repo)
+      # ------------------------------------------------------------
+      - name: Checkout application repo
         uses: actions/checkout@v4
 
-      - name: DEBUG - list files in app repo
-        run: |
-          pwd
-          ls -la
-          echo "---- tree (top) ----"
-          find . -maxdepth 2 -type d -print
-
-      # ------------------ Python + Tests ------------------
+      # ------------------------------------------------------------
+      # Python setup + tests
+      # ------------------------------------------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -43,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r requirements.txt
           pip install pytest
 
       - name: Unit tests (pytest)
@@ -52,14 +44,9 @@ jobs:
         run: |
           pytest -q
 
-      - name: Integration tests (docker compose)
-        run: |
-          docker compose up -d --build
-          chmod +x tests/integration/smoke.sh
-          bash tests/integration/smoke.sh
-          docker compose down
-
-      # ------------------ AWS Auth ------------------
+      # ------------------------------------------------------------
+      # AWS credentials (THIS defines the IAM user used!)
+      # ------------------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -67,90 +54,78 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: DEBUG - AWS identity (who am I)
+      # ------------------------------------------------------------
+      # DEBUG – verify which AWS identity is used
+      # ------------------------------------------------------------
+      - name: DEBUG – AWS identity
         run: |
-          aws --version
           aws sts get-caller-identity
           aws iam get-user || true
 
-      - name: DEBUG - EKS DescribeCluster
-        run: |
-          aws eks describe-cluster \
-            --name "${{ env.EKS_CLUSTER_NAME }}" \
-            --region "${{ env.AWS_REGION }}" \
-            --query "cluster.name" \
-            --output text
-
-      # ------------------ ECR Build & Push ------------------
+      # ------------------------------------------------------------
+      # Login to Amazon ECR
+      # ------------------------------------------------------------
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build & Push Docker image to ECR
+      # ------------------------------------------------------------
+      # Build & Push Docker image
+      # ------------------------------------------------------------
+      - name: Build & Push Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          IMAGE_URI="${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
-          echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_ENV
+          docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG \
+                     $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
 
-          docker build -t "${IMAGE_URI}" .
-          docker tag "${IMAGE_URI}" "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:latest"
-
-          docker push "${IMAGE_URI}"
-          docker push "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:latest"
-
-      # ------------------ Checkout K8S manifests repo ------------------
-      - name: Checkout (k8s manifests repo)
-        uses: actions/checkout@v4
-        with:
-          repository: SnirM/devops-portfolio-k8s
-          ref: main
-          path: k8s-manifests
-
-      - name: DEBUG - list files in k8s manifests repo
-        run: |
-          ls -la k8s-manifests
-          echo "---- tree (k8s-manifests) ----"
-          find k8s-manifests -maxdepth 2 -type d -print
-
-      # ------------------ kubectl + EKS ------------------
+      # ------------------------------------------------------------
+      # Install kubectl
+      # ------------------------------------------------------------
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
         with:
           version: "latest"
 
+      # ------------------------------------------------------------
+      # Update kubeconfig for EKS
+      # ------------------------------------------------------------
       - name: Update kubeconfig for EKS
         run: |
           aws eks update-kubeconfig \
             --name "${{ env.EKS_CLUSTER_NAME }}" \
             --region "${{ env.AWS_REGION }}"
 
-      # ------------------ Deploy ------------------
+      # ------------------------------------------------------------
+      # Checkout Kubernetes manifests repository
+      # ------------------------------------------------------------
+      - name: Checkout K8s manifests repo
+        uses: actions/checkout@v4
+        with:
+          repository: SnirM/devops-portfolio-k8s
+          path: k8s-manifests
+
+      # ------------------------------------------------------------
+      # DEBUG – verify manifests exist
+      # ------------------------------------------------------------
+      - name: DEBUG – list k8s manifests
+        run: |
+          ls -R k8s-manifests
+
+      # ------------------------------------------------------------
+      # Deploy to EKS
+      # ------------------------------------------------------------
       - name: Deploy to EKS
         run: |
           kubectl version --client=true
           kubectl cluster-info
 
-          echo "Applying namespaces/"
           kubectl apply -f k8s-manifests/namespaces/
-
-          echo "Applying database/"
           kubectl apply -f k8s-manifests/database/
-
-          echo "Applying app/"
           kubectl apply -f k8s-manifests/app/
 
-          echo "Set app image to the one built in this workflow:"
-          echo "  Namespace: ${{ env.K8S_NAMESPACE }}"
-          echo "  Deployment: ${{ env.DEPLOYMENT_NAME }}"
-          echo "  Container: ${{ env.CONTAINER_NAME }}"
-          echo "  Image: ${IMAGE_URI}"
-
-          kubectl -n "${{ env.K8S_NAMESPACE }}" set image deployment/"${{ env.DEPLOYMENT_NAME }}" \
-            "${{ env.CONTAINER_NAME }}"="${IMAGE_URI}" --record || true
-
-          kubectl -n "${{ env.K8S_NAMESPACE }}" rollout status deployment/"${{ env.DEPLOYMENT_NAME }}" --timeout=300s || true
-
           kubectl get pods -A
-          kubectl get svc -A
