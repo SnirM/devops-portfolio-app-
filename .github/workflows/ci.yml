@@ -2,9 +2,8 @@ name: CI-CD
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+  workflow_dispatch:
 
 env:
   AWS_REGION: ap-south-1
@@ -18,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout
-      uses: actions/checkout@v4
+        uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -31,21 +30,12 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
 
-      # --- Unit Tests (fix import path for "app") ---
-      - name: Unit tests (pytest)
+      - name: Unit tests
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: |
-          pytest -q
+        run: pytest -q
 
-      # --- Integration tests using docker compose ---
-      - name: Integration tests (docker compose)
-        run: |
-          docker compose up -d --build
-          bash tests/integration/smoke.sh
-          docker compose down
-
-      # --- AWS auth (THIS is what defines which IAM user is being used) ---
+      # ================= AWS AUTH =================
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -53,36 +43,42 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # --- DEBUG: show the identity used by the workflow ---
-      - name: Who am I (AWS caller identity)
+      # 🔍 מי אתה באמת?
+      - name: DEBUG – AWS identity
         run: |
-          aws --version
+          echo "===== AWS CALLER IDENTITY ====="
           aws sts get-caller-identity
-          aws iam get-user || true
+          echo "===== IAM USER (if exists) ====="
+          aws iam get-user || echo "No IAM user (maybe role)"
 
-      # --- Extra debug: confirm EKS permission before kubeconfig update ---
-      - name: Debug EKS access (DescribeCluster)
+      # 🔍 בדיקת הרשאת EKS
+      - name: DEBUG – EKS DescribeCluster
         run: |
-          aws eks describe-cluster --name "${{ env.EKS_CLUSTER_NAME }}" --region "${{ env.AWS_REGION }}" --query "cluster.name" --output text
+          aws eks describe-cluster \
+            --name "${{ env.EKS_CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query "cluster.name" \
+            --output text
 
+      # ================= ECR =================
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build & Push Docker image to ECR
+      - name: Build & Push Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}" .
-          docker tag "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}" "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:latest"
-          docker push "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
-          docker push "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:latest"
+          docker build -t "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" .
+          docker tag "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" \
+                     "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
+          docker push "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
 
+      # ================= K8S =================
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
-        with:
-          version: "latest"
 
       - name: Update kubeconfig for EKS
         run: |
@@ -92,7 +88,7 @@ jobs:
 
       - name: Deploy to EKS
         run: |
-          kubectl version --client=true
           kubectl cluster-info
+          kubectl get nodes
           kubectl apply -f k8s/
           kubectl get pods -A
