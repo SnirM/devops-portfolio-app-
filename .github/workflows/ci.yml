@@ -1,10 +1,9 @@
-name: CI-CD Pipeline
+name: CI-CD
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    branches:
+      - main
   workflow_dispatch:
 
 env:
@@ -18,35 +17,47 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ------------------------------------------------------------
-      # Checkout APP repository (this repo)
-      # ------------------------------------------------------------
-      - name: Checkout application repo
+      # -----------------------------
+      # Checkout code
+      # -----------------------------
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # Python setup + tests
-      # ------------------------------------------------------------
+      # -----------------------------
+      # Setup Python
+      # -----------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # -----------------------------
+      # Install dependencies
+      # -----------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
 
+      # -----------------------------
+      # Unit tests
+      # -----------------------------
       - name: Unit tests (pytest)
-        env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: |
-          pytest -q
+        run: pytest -v
 
-      # ------------------------------------------------------------
-      # AWS credentials (THIS defines the IAM user used!)
-      # ------------------------------------------------------------
+      # -----------------------------
+      # Integration tests (docker-compose)
+      # -----------------------------
+      - name: Integration tests
+        run: |
+          docker compose -f docker-compose.yml up -d
+          sleep 15
+          pytest tests/integration -v
+          docker compose down
+
+      # -----------------------------
+      # Configure AWS credentials
+      # -----------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -54,71 +65,51 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ------------------------------------------------------------
-      # DEBUG – verify which AWS identity is used
-      # ------------------------------------------------------------
-      - name: DEBUG – AWS identity
-        run: |
-          aws sts get-caller-identity
-          aws iam get-user || true
+      # -----------------------------
+      # 🔍 WHO AM I – קריטי!
+      # -----------------------------
+      - name: Who am I (AWS identity)
+        run: aws sts get-caller-identity
 
-      # ------------------------------------------------------------
+      # -----------------------------
       # Login to Amazon ECR
-      # ------------------------------------------------------------
+      # -----------------------------
       - name: Login to Amazon ECR
-        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ------------------------------------------------------------
+      # -----------------------------
       # Build & Push Docker image
-      # ------------------------------------------------------------
-      - name: Build & Push Docker image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+      # -----------------------------
+      - name: Build and push Docker image to ECR
         run: |
-          docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG \
-                     $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
-          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
-          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+          IMAGE_URI=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:latest
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
 
-      # ------------------------------------------------------------
-      # Install kubectl
-      # ------------------------------------------------------------
+      # -----------------------------
+      # Setup kubectl
+      # -----------------------------
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
-        with:
-          version: "latest"
 
-      # ------------------------------------------------------------
+      # -----------------------------
       # Update kubeconfig for EKS
-      # ------------------------------------------------------------
+      # -----------------------------
       - name: Update kubeconfig for EKS
         run: |
           aws eks update-kubeconfig \
-            --name "${{ env.EKS_CLUSTER_NAME }}" \
-            --region "${{ env.AWS_REGION }}"
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
 
-      # ------------------------------------------------------------
-      # Checkout Kubernetes manifests repository
-      # ------------------------------------------------------------
-      - name: Checkout K8s manifests repo
-        uses: actions/checkout@v4
-        with:
-          repository: SnirM/devops-portfolio-k8s
-          path: k8s-manifests
-
-      # ------------------------------------------------------------
-      # DEBUG – verify manifests exist
-      # ------------------------------------------------------------
+      # -----------------------------
+      # Debug – list manifests
+      # -----------------------------
       - name: DEBUG – list k8s manifests
-        run: |
-          ls -R k8s-manifests
+        run: ls -R k8s-manifests
 
-      # ------------------------------------------------------------
+      # -----------------------------
       # Deploy to EKS
-      # ------------------------------------------------------------
+      # -----------------------------
       - name: Deploy to EKS
         run: |
           kubectl version --client=true
