@@ -5,53 +5,47 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-  workflow_dispatch: {}
 
-concurrency:
-  group: ci-cd-${{ github.ref }}
-  cancel-in-progress: true
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: devops-portfolio-app
+  EKS_CLUSTER_NAME: devops-portfolio-eks
+  PYTHON_VERSION: "3.11"
 
 jobs:
   pipeline:
     runs-on: ubuntu-latest
 
-    env:
-      AWS_REGION: ap-south-1
-      EKS_CLUSTER_NAME: devops-portfolio-eks
-      ECR_REPOSITORY: devops-portfolio-app
-      APP_PORT: "8000"
-
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+      uses: actions/checkout@v4
 
-      # ---------- Python Unit Tests ----------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install pytest
 
+      # --- Unit Tests (fix import path for "app") ---
       - name: Unit tests (pytest)
         env:
-          # זה התיקון ל- ModuleNotFoundError: No module named 'app'
           PYTHONPATH: ${{ github.workspace }}
         run: |
           pytest -q
 
-      # ---------- Integration Tests (docker compose) ----------
+      # --- Integration tests using docker compose ---
       - name: Integration tests (docker compose)
         run: |
           docker compose up -d --build
-          chmod +x tests/integration/smoke.sh
           bash tests/integration/smoke.sh
           docker compose down
 
-      # ---------- AWS Auth ----------
+      # --- AWS auth (THIS is what defines which IAM user is being used) ---
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -59,51 +53,46 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # --- DEBUG: show the identity used by the workflow ---
+      - name: Who am I (AWS caller identity)
+        run: |
+          aws --version
+          aws sts get-caller-identity
+          aws iam get-user || true
+
+      # --- Extra debug: confirm EKS permission before kubeconfig update ---
+      - name: Debug EKS access (DescribeCluster)
+        run: |
+          aws eks describe-cluster --name "${{ env.EKS_CLUSTER_NAME }}" --region "${{ env.AWS_REGION }}" --query "cluster.name" --output text
+
       - name: Login to Amazon ECR
-        id: ecr_login
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ---------- Build & Push Image ----------
       - name: Build & Push Docker image to ECR
         env:
-          ECR_REGISTRY: ${{ steps.ecr_login.outputs.registry }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          IMAGE_URI="$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
-          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+          docker build -t "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}" .
+          docker tag "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}" "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:latest"
+          docker push "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}"
+          docker push "${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:latest"
 
-          docker build -t "$IMAGE_URI" .
-          docker push "$IMAGE_URI"
-
-      # ---------- kubectl ----------
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
         with:
           version: "latest"
 
-      # ---------- EKS kubeconfig ----------
       - name: Update kubeconfig for EKS
         run: |
           aws eks update-kubeconfig \
             --name "${{ env.EKS_CLUSTER_NAME }}" \
             --region "${{ env.AWS_REGION }}"
 
-      # ---------- Deploy ----------
       - name: Deploy to EKS
-        env:
-          IMAGE_URI: ${{ env.IMAGE_URI }}
         run: |
-          echo "Deploying image: $IMAGE_URI"
-
-          # אם ה-K8S שלך משתמש ב-image placeholder, מחליפים אותו בזמן ריצה
-          # בהנחה שיש לך k8s/ עם קבצים (deployment/service וכו')
-          # ושבתוך deployment יש image: REPLACE_IMAGE
-          if grep -R "REPLACE_IMAGE" -n k8s >/dev/null 2>&1; then
-            sed -i "s|REPLACE_IMAGE|$IMAGE_URI|g" k8s/*.yaml
-          fi
-
+          kubectl version --client=true
+          kubectl cluster-info
           kubectl apply -f k8s/
-
-          kubectl rollout status deployment/devops-portfolio-app --timeout=180s || true
-          kubectl get pods -o wide
-          kubectl get svc -o wide
+          kubectl get pods -A
