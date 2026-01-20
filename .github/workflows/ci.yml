@@ -2,8 +2,7 @@ name: CI-CD
 
 on:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
   workflow_dispatch:
 
 env:
@@ -17,49 +16,68 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ----------------------------
-      # Checkout code
-      # ----------------------------
+      # -----------------------------
+      # Checkout
+      # -----------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ----------------------------
-      # Setup Python
-      # ----------------------------
+      # -----------------------------
+      # Python setup
+      # -----------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # ----------------------------
-      # Install dependencies
-      # ----------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ----------------------------
-      # Unit tests
-      # ----------------------------
+      # -----------------------------
+      # Unit tests (pytest)
+      # -----------------------------
       - name: Unit tests (pytest)
         run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE"
+          export PYTHONPATH="${GITHUB_WORKSPACE}"
           pytest -v
 
-      # ----------------------------
-      # Integration tests (docker-compose)
-      # ----------------------------
+      # -----------------------------
+      # Integration tests (docker compose)
+      # FIX: wait until /health is ready + show logs on failure
+      # -----------------------------
       - name: Integration tests (docker compose)
         run: |
+          set -e
+
           docker compose up -d --build
-          curl -f http://localhost:8000/health
-          bash tests/integration/smoke.sh
+
+          echo "Waiting for app health on http://localhost:8000/health ..."
+          for i in {1..40}; do
+            if curl -fsS http://localhost:8000/health >/dev/null; then
+              echo "Health OK ✅"
+              break
+            fi
+
+            echo "Not ready yet (attempt $i/40) - showing last 20 lines of app logs:"
+            docker compose logs --tail=20 app || true
+            sleep 3
+          done
+
+          # Final check (hard fail if still not ready)
+          curl -fsS http://localhost:8000/health
+
+          # If you have your own smoke script, keep it:
+          if [ -f "tests/integration/smoke.sh" ]; then
+            bash tests/integration/smoke.sh
+          fi
+
           docker compose down
 
-      # ----------------------------
-      # Configure AWS credentials
-      # ----------------------------
+      # -----------------------------
+      # Configure AWS credentials (MUST be student-Snir.Amira keys in secrets)
+      # -----------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -67,54 +85,89 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ----------------------------
+      # -----------------------------
       # Who am I (AWS identity)
-      # ----------------------------
+      # -----------------------------
       - name: Who am I (AWS identity)
         run: aws sts get-caller-identity
 
-      # ----------------------------
-      # Login to Amazon ECR
-      # ----------------------------
+      # -----------------------------
+      # Login to ECR
+      # -----------------------------
       - name: Login to Amazon ECR
+        id: ecr_login
         uses: aws-actions/amazon-ecr-login@v2
 
-      # ----------------------------
+      # -----------------------------
       # Build & Push Docker image to ECR
-      # ----------------------------
+      # -----------------------------
       - name: Build & Push Docker image to ECR
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REGISTRY: ${{ steps.ecr_login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+          set -e
+          echo "ECR_REGISTRY=$ECR_REGISTRY"
+          echo "Building image..."
+          docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
 
-          docker build -t "${IMAGE_URI}" .
-          docker push "${IMAGE_URI}"
+          echo "Pushing image..."
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
 
-      # ----------------------------
+      # -----------------------------
       # Setup kubectl
-      # ----------------------------
+      # -----------------------------
       - name: Setup kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: "latest"
+        run: |
+          set -e
+          curl -sSL -o kubectl "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+          kubectl version --client=true
 
-      # ----------------------------
+      # -----------------------------
       # Update kubeconfig for EKS
-      # ----------------------------
+      # -----------------------------
       - name: Update kubeconfig for EKS
         run: |
-          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+          set -e
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
           kubectl cluster-info
 
-      # ----------------------------
-      # Deploy to EKS (apply manifests)
-      # ----------------------------
-      - name: Deploy to EKS
+      # -----------------------------
+      # Important: wait for AWS Load Balancer Controller (prevents webhook "no endpoints")
+      # -----------------------------
+      - name: Wait for aws-load-balancer-controller (if installed)
         run: |
+          set -e
+          if kubectl -n kube-system get deploy aws-load-balancer-controller >/dev/null 2>&1; then
+            echo "Waiting for aws-load-balancer-controller rollout..."
+            kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=5m
+            echo "Controller ready ✅"
+          else
+            echo "aws-load-balancer-controller not found in kube-system (skipping wait)"
+          fi
+
+      # -----------------------------
+      # Deploy to EKS
+      # -----------------------------
+      - name: Deploy to EKS
+        env:
+          ECR_REGISTRY: ${{ steps.ecr_login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -e
+
+          # Apply manifests
           kubectl apply -f k8s-manifests/namespaces/
           kubectl apply -f k8s-manifests/database/
           kubectl apply -f k8s-manifests/app/
+
+          # OPTIONAL (only if you have a deployment you want to force to the new image)
+          # Example (change namespace/name/container as needed):
+          # kubectl -n demo set image deployment/devops-portfolio-app devops-portfolio-app=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+
           kubectl get pods -A
+          kubectl get svc -A
